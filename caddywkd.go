@@ -1,6 +1,8 @@
 package caddywkd
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,17 +51,15 @@ func (w *WKD) Provision(ctx caddy.Context) error {
 
 	info, err := os.Stat(w.Path)
 	if err != nil {
-		return fmt.Errorf("cannot access path %s: %v", w.Path, err)
+		return fmt.Errorf("cannot access path %s: %w", w.Path, err)
 	}
 
 	if info.IsDir() {
 		if err := w.loadDir(w.Path); err != nil {
 			return err
 		}
-	} else {
-		if err := w.loadFile(w.Path); err != nil {
-			return err
-		}
+	} else if err := w.loadFile(w.Path); err != nil {
+		return err
 	}
 
 	w.logger.Info("loaded WKD keys",
@@ -85,7 +85,7 @@ func (w *WKD) loadFile(path string) error {
 		}
 		el, err = openpgp.ReadArmoredKeyRing(f)
 		if err != nil {
-			return fmt.Errorf("%s: not a valid binary or armored keyring: %v", path, err)
+			return fmt.Errorf("%s: not a valid binary or armored keyring: %w", path, err)
 		}
 	}
 
@@ -158,6 +158,11 @@ func (w *WKD) Discover(hash string) ([]*openpgp.Entity, error) {
 }
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(rw, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return nil
+	}
+
 	if !strings.HasPrefix(r.URL.Path, wkd.Base) {
 		return next.ServeHTTP(rw, r)
 	}
@@ -172,8 +177,12 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 
 	case strings.HasPrefix(path, "/hu/"):
 		hash := strings.TrimPrefix(path, "/hu/")
+		if !isValidWKDHash(hash) {
+			http.NotFound(rw, r)
+			return nil
+		}
 		pubkeys, err := w.Discover(hash)
-		if err == wkd.ErrNotFound {
+		if errors.Is(err, wkd.ErrNotFound) {
 			http.NotFound(rw, r)
 			return nil
 		}
@@ -182,13 +191,15 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 			return nil
 		}
 
-		rw.Header().Set("Content-Type", "application/octet-string")
+		var buf bytes.Buffer
 		for _, e := range pubkeys {
-			if err := e.Serialize(rw); err != nil {
+			if err := e.Serialize(&buf); err != nil {
 				return err
 			}
 		}
-		return nil
+		rw.Header().Set("Content-Type", "application/octet-stream")
+		_, err = rw.Write(buf.Bytes())
+		return err
 	}
 
 	http.NotFound(rw, r)
@@ -227,6 +238,21 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	var w WKD
 	err := w.UnmarshalCaddyfile(h.Dispenser)
 	return &w, err
+}
+
+// isValidWKDHash returns true if s looks like a valid WKD hash:
+// exactly 32 characters from the z-base-32 alphabet.
+func isValidWKDHash(s string) bool {
+	const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune(zbase32Alphabet, c) {
+			return false
+		}
+	}
+	return true
 }
 
 var (

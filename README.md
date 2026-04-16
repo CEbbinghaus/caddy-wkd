@@ -25,7 +25,9 @@ wkd {
 ```
 
 If `path` is a file, it is loaded as a keyring (binary first, then armored).
-If `path` is a directory, all files matching `extensions` are loaded.
+If `path` is a directory, all files matching `extensions` are loaded. Only
+files in the top-level of the directory are read — subdirectories are not
+scanned recursively.
 If `extensions` is omitted, defaults are: `.gpg`, `.asc`, `.pub`, `.key`.
 
 ### JSON

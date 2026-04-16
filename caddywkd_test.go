@@ -2,6 +2,9 @@ package caddywkd
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +13,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/emersion/go-openpgp-wkd"
 	"go.uber.org/zap"
 )
@@ -96,7 +100,7 @@ func TestIndexEntitiesAndDiscoverMiss(t *testing.T) {
 		t.Fatalf("Discover expected hit, got error: %v", err)
 	}
 
-	if _, err := w.Discover("missing"); err != wkd.ErrNotFound {
+	if _, err := w.Discover("missing"); !errors.Is(err, wkd.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -175,6 +179,106 @@ func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
 		hash, _ := wkd.HashAddress("erin@example.com")
 		if _, err := w.Discover(hash); err != nil {
 			t.Fatalf("Discover after directory provision failed: %v", err)
+		}
+	})
+}
+
+func TestServeHTTP(t *testing.T) {
+	entity := mustNewEntity(t, "frank@example.com")
+	dir := t.TempDir()
+	mustWriteBinaryKey(t, filepath.Join(dir, "frank.gpg"), entity)
+
+	w := WKD{Path: dir}
+	ctx := caddy.Context{Context: context.Background()}
+	if err := w.Provision(ctx); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+
+	validHash, err := wkd.HashAddress("frank@example.com")
+	if err != nil {
+		t.Fatalf("HashAddress failed: %v", err)
+	}
+
+	// nextHandler records whether it was called.
+	var nextCalled bool
+	next := caddyhttp.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) error {
+		nextCalled = true
+		return nil
+	})
+
+	t.Run("policy", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/policy", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if body := rec.Body.String(); body == "" {
+			t.Fatal("expected non-empty policy body")
+		}
+	})
+
+	t.Run("hu_hit", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatal("expected non-empty key body")
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+			t.Fatalf("expected Content-Type application/octet-stream, got %q", ct)
+		}
+	})
+
+	t.Run("hu_miss", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+	})
+
+	t.Run("hu_invalid_hash", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/../../etc/passwd", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for invalid hash, got %d", rec.Code)
+		}
+	})
+
+	t.Run("passthrough", func(t *testing.T) {
+		nextCalled = false
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/some/other/path", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if !nextCalled {
+			t.Fatal("expected next handler to be called for non-WKD path")
+		}
+	})
+
+	t.Run("method_not_allowed", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405, got %d", rec.Code)
 		}
 	})
 }
