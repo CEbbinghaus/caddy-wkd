@@ -1,82 +1,267 @@
 package caddywkd
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/emersion/go-openpgp-wkd"
-	"github.com/caddyserver/caddy"
-	"github.com/caddyserver/caddy/caddyhttp/httpserver"
-	"golang.org/x/crypto/openpgp"
+	"go.uber.org/zap"
 )
 
 func init() {
-	caddy.RegisterPlugin("wkd", caddy.Plugin{
-		ServerType: "http",
-		Action:     setup,
-	})
+	caddy.RegisterModule(WKD{})
+	httpcaddyfile.RegisterHandlerDirective("wkd", parseCaddyfile)
 }
 
-type plugin struct {
-	Next    httpserver.Handler
-	Pubkeys map[string]openpgp.EntityList
-	Handler wkd.Handler
+type WKD struct {
+	Path       string   `json:"path"`
+	Extensions []string `json:"extensions,omitempty"`
+
+	pubkeys map[string]openpgp.EntityList
+	logger  *zap.Logger
 }
 
-func (p *plugin) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
-	if !httpserver.Path(r.URL.Path).Matches(wkd.Base) {
-		return p.Next.ServeHTTP(w, r)
+var defaultExtensions = []string{".gpg", ".asc", ".pub", ".key"}
+
+func (WKD) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.wkd",
+		New: func() caddy.Module { return new(WKD) },
+	}
+}
+
+func (w *WKD) Provision(ctx caddy.Context) error {
+	w.logger = ctx.Logger(w)
+	w.pubkeys = map[string]openpgp.EntityList{}
+
+	if len(w.Extensions) == 0 {
+		w.Extensions = defaultExtensions
 	}
 
-	p.Handler.ServeHTTP(w, r)
-	return 0, nil
+	info, err := os.Stat(w.Path)
+	if err != nil {
+		return fmt.Errorf("cannot access path %s: %w", w.Path, err)
+	}
+
+	if info.IsDir() {
+		if err := w.loadDir(w.Path); err != nil {
+			return err
+		}
+	} else if err := w.loadFile(w.Path); err != nil {
+		return err
+	}
+
+	w.logger.Info("loaded WKD keys",
+		zap.Int("identities", len(w.pubkeys)),
+		zap.String("path", w.Path),
+		zap.Bool("is_dir", info.IsDir()),
+	)
+
+	return nil
 }
 
-func (p *plugin) Discover(hash string) ([]*openpgp.Entity, error) {
-	pubkey, ok := p.Pubkeys[hash]
+func (w *WKD) loadFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	el, err := openpgp.ReadKeyRing(f)
+	if err != nil {
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+			return seekErr
+		}
+		el, err = openpgp.ReadArmoredKeyRing(f)
+		if err != nil {
+			return fmt.Errorf("%s: not a valid binary or armored keyring: %w", path, err)
+		}
+	}
+
+	w.indexEntities(el)
+	return nil
+}
+
+func (w *WKD) loadDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	extSet := make(map[string]bool, len(w.Extensions))
+	for _, ext := range w.Extensions {
+		extSet[strings.ToLower(ext)] = true
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !extSet[strings.ToLower(filepath.Ext(entry.Name()))] {
+			w.logger.Debug("skipping file", zap.String("file", entry.Name()))
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		if err := w.loadFile(path); err != nil {
+			return err
+		}
+		w.logger.Debug("loaded key file", zap.String("file", entry.Name()))
+	}
+	return nil
+}
+
+func (w *WKD) indexEntities(el openpgp.EntityList) {
+	for _, e := range el {
+		for _, ident := range e.Identities {
+			if ident == nil || ident.UserId == nil {
+				continue
+			}
+
+			hash, err := wkd.HashAddress(ident.UserId.Email)
+			if err != nil {
+				w.logger.Warn("failed to hash address",
+					zap.String("email", ident.UserId.Email),
+					zap.Error(err),
+				)
+				continue
+			}
+			w.pubkeys[hash] = append(w.pubkeys[hash], e)
+		}
+	}
+}
+
+func (w *WKD) Validate() error {
+	if w.Path == "" {
+		return fmt.Errorf("path is required")
+	}
+	return nil
+}
+
+func (w *WKD) Discover(hash string) ([]*openpgp.Entity, error) {
+	pubkey, ok := w.pubkeys[hash]
 	if !ok {
 		return nil, wkd.ErrNotFound
 	}
 	return pubkey, nil
 }
 
-func setup(c *caddy.Controller) error {
-	pubkeys := map[string]openpgp.EntityList{}
-	for c.Next() {
-		if !c.NextArg() {
-			return c.ArgErr()
-		}
+func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.Header().Set("Allow", "GET, HEAD")
+		http.Error(rw, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return nil
+	}
 
-		path := c.Val()
-		f, err := os.Open(path)
-		if err != nil {
+	if !strings.HasPrefix(r.URL.Path, wkd.Base) {
+		return next.ServeHTTP(rw, r)
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, wkd.Base)
+	switch {
+	case path == "/policy":
+		if _, err := fmt.Fprintf(rw, "protocol-version: %v\n", wkd.Version); err != nil {
 			return err
 		}
+		return nil
 
-		el, err := openpgp.ReadKeyRing(f)
-		f.Close()
+	case strings.HasPrefix(path, "/hu/"):
+		hash := strings.TrimPrefix(path, "/hu/")
+		if !isValidWKDHash(hash) {
+			http.NotFound(rw, r)
+			return nil
+		}
+		pubkeys, err := w.Discover(hash)
+		if errors.Is(err, wkd.ErrNotFound) {
+			http.NotFound(rw, r)
+			return nil
+		}
 		if err != nil {
-			return err
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return nil
 		}
 
-		for _, e := range el {
-			for _, ident := range e.Identities {
-				// TODO: check domain part of the address
-				hash, err := wkd.HashAddress(ident.UserId.Email)
-				if err != nil {
-					return err
+		var buf bytes.Buffer
+		for _, e := range pubkeys {
+			if err := e.Serialize(&buf); err != nil {
+				return err
+			}
+		}
+		rw.Header().Set("Content-Type", "application/octet-stream")
+		_, err = rw.Write(buf.Bytes())
+		return err
+	}
+
+	http.NotFound(rw, r)
+	return nil
+}
+
+func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		if d.NextArg() {
+			w.Path = d.Val()
+		}
+
+		for nesting := d.Nesting(); d.NextBlock(nesting); {
+			switch d.Val() {
+			case "path":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				w.Path = d.Val()
+
+			case "extensions":
+				w.Extensions = d.RemainingArgs()
+				if len(w.Extensions) == 0 {
+					return d.ArgErr()
 				}
 
-				pubkeys[hash] = append(pubkeys[hash], e)
+			default:
+				return d.Errf("unknown directive: %s", d.Val())
 			}
 		}
 	}
-
-	httpserver.GetConfig(c).AddMiddleware(func(next httpserver.Handler) httpserver.Handler {
-		p := &plugin{Pubkeys: pubkeys, Next: next}
-		p.Handler.Discover = p.Discover
-		return p
-	})
-
 	return nil
 }
+
+func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	var w WKD
+	err := w.UnmarshalCaddyfile(h.Dispenser)
+	return &w, err
+}
+
+// zbase32Alphabet is the alphabet used by z-base-32 encoding (RFC 6189 / Zooko's base32).
+const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
+
+// isValidWKDHash returns true if s looks like a valid WKD hash:
+// exactly 32 characters from the z-base-32 alphabet.
+func isValidWKDHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune(zbase32Alphabet, c) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	_ caddy.Module                = (*WKD)(nil)
+	_ caddy.Provisioner           = (*WKD)(nil)
+	_ caddy.Validator             = (*WKD)(nil)
+	_ caddyhttp.MiddlewareHandler = (*WKD)(nil)
+	_ caddyfile.Unmarshaler       = (*WKD)(nil)
+)
