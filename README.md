@@ -4,10 +4,38 @@
 
 ## Usage
 
-Put this directive in a HTTP server block:
+`wkd` is a Caddy v2 HTTP handler.
 
+### Caddyfile
+
+Inline form (auto-detects whether `path` is a file or directory):
+
+```caddyfile
+wkd /etc/wkd/keyring.gpg
+wkd /etc/wkd/keys/
 ```
-wkd <path to PGP public key>…
+
+Block form:
+
+```caddyfile
+wkd {
+    path /etc/wkd/keys/
+    extensions .gpg .asc .pub .key
+}
+```
+
+If `path` is a file, it is loaded as a keyring (binary first, then armored).
+If `path` is a directory, all files matching `extensions` are loaded.
+If `extensions` is omitted, defaults are: `.gpg`, `.asc`, `.pub`, `.key`.
+
+### JSON
+
+```json
+{
+  "handler": "wkd",
+  "path": "/etc/wkd/keys/",
+  "extensions": [".gpg", ".asc"]
+}
 ```
 
 ## License
