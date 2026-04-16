@@ -280,6 +280,9 @@ func TestServeHTTP(t *testing.T) {
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("expected 405, got %d", rec.Code)
 		}
+		if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+			t.Fatalf("expected Allow: GET, HEAD, got %q", allow)
+		}
 	})
 }
 

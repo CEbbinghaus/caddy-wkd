@@ -159,6 +159,7 @@ func (w *WKD) Discover(hash string) ([]*openpgp.Entity, error) {
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.Header().Set("Allow", "GET, HEAD")
 		http.Error(rw, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return nil
 	}
@@ -240,10 +241,12 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	return &w, err
 }
 
+// zbase32Alphabet is the alphabet used by z-base-32 encoding (RFC 6189 / Zooko's base32).
+const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
+
 // isValidWKDHash returns true if s looks like a valid WKD hash:
 // exactly 32 characters from the z-base-32 alphabet.
 func isValidWKDHash(s string) bool {
-	const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
 	if len(s) != 32 {
 		return false
 	}
