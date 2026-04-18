@@ -93,9 +93,8 @@ func (w *WKD) Provision(ctx caddy.Context) error {
 	}
 
 	w.logger.Info("loaded WKD keys",
-		zap.Int("identities", len(w.pubkeys)),
+		zap.Int("identities", len(w.pubkeys[""])),
 		zap.String("path", w.Path),
-		zap.Bool("is_dir", info.IsDir()),
 	)
 
 	return nil
