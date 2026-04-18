@@ -509,7 +509,7 @@ func TestCleanupCancelsRescanContext(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
+	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected context cancellation")
 	}
 }
