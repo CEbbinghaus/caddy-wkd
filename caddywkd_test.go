@@ -25,6 +25,8 @@ func TestLoadFileBinaryAndDiscover(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "key.gpg")
 	mustWriteBinaryKey(t, path, entity)
 
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	if err := w.loadFile(path); err != nil {
 		t.Fatalf("loadFile(binary) failed: %v", err)
 	}
@@ -47,6 +49,8 @@ func TestLoadFileArmoredAndDiscover(t *testing.T) {
 	entity := mustNewEntity(t, "bob@example.com")
 	path := filepath.Join(t.TempDir(), "key.asc")
 	mustWriteArmoredKey(t, path, entity)
+
+	w.Provision(caddy.Context{Context: context.Background()})
 
 	if err := w.loadFile(path); err != nil {
 		t.Fatalf("loadFile(armored) failed: %v", err)
@@ -75,6 +79,8 @@ func TestLoadDirFiltersByExtensions(t *testing.T) {
 		t.Fatalf("write ignore file failed: %v", err)
 	}
 
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	if err := w.loadDir(dir); err != nil {
 		t.Fatalf("loadDir failed: %v", err)
 	}
@@ -92,6 +98,9 @@ func TestDiscoverDomainFiltering(t *testing.T) {
 	w := newTestWKD()
 	entityExampleCom := mustNewEntity(t, "dave@example.com")
 	entityExampleOrg := mustNewEntity(t, "dave@example.org")
+
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	w.indexEntities(openpgp.EntityList{entityExampleCom, entityExampleOrg})
 
 	hash, err := wkd.HashAddress("dave@example.com")
@@ -135,6 +144,9 @@ func TestDiscoverDomainFiltering(t *testing.T) {
 func TestIndexEntitiesAndDiscoverMiss(t *testing.T) {
 	w := newTestWKD()
 	entity := mustNewEntity(t, "dave@example.com")
+
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	w.indexEntities(openpgp.EntityList{entity})
 
 	hash, err := wkd.HashAddress("dave@example.com")
