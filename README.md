@@ -86,6 +86,8 @@ wkd {
 }
 ```
 
+`rescan` in JSON uses Go duration nanoseconds (`300000000000` = `5m`).
+
 ## License
 
 MIT

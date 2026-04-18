@@ -398,10 +398,11 @@ func (w *WKD) rescanLoop(ctx context.Context, interval time.Duration) {
 
 			w.mu.Lock()
 			w.pubkeys = fresh
+			identities := len(w.pubkeys[""])
 			w.mu.Unlock()
 
 			w.logger.Info("rescanned WKD keys",
-				zap.Int("identities", len(fresh[""])),
+				zap.Int("identities", identities),
 				zap.String("path", w.Path),
 			)
 		}
