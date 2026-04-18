@@ -86,6 +86,7 @@ func (w *WKD) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return err
 	}
+	identities := len(pubkeys[""])
 
 	w.mu.Lock()
 	w.pubkeys = pubkeys
@@ -96,10 +97,6 @@ func (w *WKD) Provision(ctx caddy.Context) error {
 		w.cancel = cancel
 		go w.rescanLoop(rctx, time.Duration(w.Rescan))
 	}
-
-	w.mu.RLock()
-	identities := len(w.pubkeys[""])
-	w.mu.RUnlock()
 
 	w.logger.Info("loaded WKD keys",
 		zap.Int("identities", identities),
@@ -395,10 +392,10 @@ func (w *WKD) rescanLoop(ctx context.Context, interval time.Duration) {
 				w.logger.Error("rescan failed", zap.Error(err))
 				continue
 			}
+			identities := len(fresh[""])
 
 			w.mu.Lock()
 			w.pubkeys = fresh
-			identities := len(w.pubkeys[""])
 			w.mu.Unlock()
 
 			w.logger.Info("rescanned WKD keys",
