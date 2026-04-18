@@ -163,8 +163,8 @@ func TestValidate(t *testing.T) {
 
 	w.Domain = "example.com"
 	w.DangerousAllowAnyHost = true
-	if err := w.Validate(); err == nil {
-		t.Fatal("expected validation error when both domain and dangerous_allow_any_host are set")
+	if err := w.Validate(); err != nil {
+		t.Fatalf("unexpected validation error when both domain and dangerous_allow_any_host are set: %v", err)
 	}
 }
 
@@ -348,6 +348,22 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("dangerous_allow_any_host_takes_precedence_over_domain", func(t *testing.T) {
+		wAnyHost := cloneWKDForTesting(&w)
+		wAnyHost.Domain = "invalid.example"
+		wAnyHost.DangerousAllowAnyHost = true
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wAnyHost.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
 	t.Run("missing_key_returns_not_found", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", nil)
@@ -399,8 +415,9 @@ func TestServeHTTP(t *testing.T) {
 
 func newTestWKD() *WKD {
 	return &WKD{
-		pubkeys: map[string]openpgp.EntityList{},
-		logger:  zap.NewNop(),
+		pubkeys:         map[string]openpgp.EntityList{},
+		pubkeysByDomain: map[string]map[string]openpgp.EntityList{},
+		logger:          zap.NewNop(),
 	}
 }
 
@@ -457,6 +474,19 @@ func cloneWKDForTesting(w *WKD) WKD {
 		Domain:                w.Domain,
 		DangerousAllowAnyHost: w.DangerousAllowAnyHost,
 		pubkeys:               pubkeys,
+		pubkeysByDomain:       clonePubkeysByDomainForTesting(w.pubkeysByDomain),
 		logger:                w.logger,
 	}
+}
+
+func clonePubkeysByDomainForTesting(src map[string]map[string]openpgp.EntityList) map[string]map[string]openpgp.EntityList {
+	dst := make(map[string]map[string]openpgp.EntityList, len(src))
+	for hash, domainMap := range src {
+		copiedDomainMap := make(map[string]openpgp.EntityList, len(domainMap))
+		for domain, entities := range domainMap {
+			copiedDomainMap[domain] = append(openpgp.EntityList(nil), entities...)
+		}
+		dst[hash] = copiedDomainMap
+	}
+	return dst
 }

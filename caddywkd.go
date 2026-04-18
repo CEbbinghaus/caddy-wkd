@@ -38,13 +38,12 @@ type WKD struct {
 	// of domain. Use with caution.
 	DangerousAllowAnyHost bool `json:"dangerous_allow_any_host,omitempty"`
 
-	pubkeys map[string]openpgp.EntityList
-	logger  *zap.Logger
+	pubkeys         map[string]openpgp.EntityList
+	pubkeysByDomain map[string]map[string]openpgp.EntityList
+	logger          *zap.Logger
 }
 
 var defaultExtensions = []string{".gpg", ".asc", ".pub", ".key"}
-
-const emailAtSeparatorCount = 1
 
 func (WKD) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
@@ -56,6 +55,7 @@ func (WKD) CaddyModule() caddy.ModuleInfo {
 func (w *WKD) Provision(ctx caddy.Context) error {
 	w.logger = ctx.Logger(w)
 	w.pubkeys = map[string]openpgp.EntityList{}
+	w.pubkeysByDomain = map[string]map[string]openpgp.EntityList{}
 
 	if len(w.Extensions) == 0 {
 		w.Extensions = defaultExtensions
@@ -141,15 +141,27 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 				continue
 			}
 
-			hash, err := wkd.HashAddress(ident.UserId.Email)
+			email := ident.UserId.Email
+			hash, err := wkd.HashAddress(email)
 			if err != nil {
 				w.logger.Warn("failed to hash address",
-					zap.String("email", ident.UserId.Email),
+					zap.String("email", email),
 					zap.Error(err),
 				)
 				continue
 			}
 			w.pubkeys[hash] = append(w.pubkeys[hash], e)
+
+			domain, ok := emailDomain(email)
+			if !ok {
+				continue
+			}
+			domainKeys := w.pubkeysByDomain[hash]
+			if domainKeys == nil {
+				domainKeys = make(map[string]openpgp.EntityList)
+				w.pubkeysByDomain[hash] = domainKeys
+			}
+			domainKeys[domain] = append(domainKeys[domain], e)
 		}
 	}
 }
@@ -157,9 +169,6 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 func (w *WKD) Validate() error {
 	if w.Path == "" {
 		return fmt.Errorf("path is required")
-	}
-	if w.Domain != "" && w.DangerousAllowAnyHost {
-		return fmt.Errorf("cannot set both 'domain' and 'dangerous_allow_any_host'")
 	}
 	return nil
 }
@@ -175,30 +184,29 @@ func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
 		return pubkey, nil
 	}
 
-	// Filter to only entities with a matching domain.
-	var matched []*openpgp.Entity
-	for _, e := range pubkey {
-		for _, ident := range e.Identities {
-			if ident == nil || ident.UserId == nil {
-				continue
-			}
-			email := ident.UserId.Email
-			if email == "" || strings.Count(email, "@") != emailAtSeparatorCount {
-				continue
-			}
-			parts := strings.SplitN(email, "@", 2)
-			if len(parts) == 2 && strings.EqualFold(parts[1], domain) {
-				matched = append(matched, e)
-				break
-			}
-		}
+	domainKeys, ok := w.pubkeysByDomain[hash]
+	if !ok {
+		return nil, wkd.ErrNotFound
 	}
-
+	matched := domainKeys[strings.ToLower(domain)]
 	if len(matched) == 0 {
 		return nil, wkd.ErrNotFound
 	}
-
 	return matched, nil
+}
+
+func (w *WKD) domainFilter(r *http.Request) string {
+	if w.DangerousAllowAnyHost {
+		return ""
+	}
+	if w.Domain != "" {
+		return w.Domain
+	}
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -227,21 +235,7 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 			return nil
 		}
 
-		// Determine the domain to filter by.
-		domain := ""
-		if !w.DangerousAllowAnyHost {
-			if w.Domain != "" {
-				domain = w.Domain
-			} else {
-				domain = r.Host
-				if h, _, err := net.SplitHostPort(domain); err == nil {
-					domain = h
-				}
-			}
-		}
-
-		// Pass domain to Discover; empty string means no filtering.
-		pubkeys, err := w.Discover(hash, domain)
+		pubkeys, err := w.Discover(hash, w.domainFilter(r))
 		if errors.Is(err, wkd.ErrNotFound) {
 			http.NotFound(rw, r)
 			return nil
@@ -264,6 +258,17 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 
 	http.NotFound(rw, r)
 	return nil
+}
+
+func emailDomain(email string) (string, bool) {
+	if email == "" || strings.Count(email, "@") != 1 {
+		return "", false
+	}
+	parts := strings.SplitN(email, "@", 2)
+	if parts[1] == "" {
+		return "", false
+	}
+	return strings.ToLower(parts[1]), true
 }
 
 func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {

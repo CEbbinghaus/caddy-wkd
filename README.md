@@ -43,7 +43,8 @@ Modes:
 - **`domain`**: override host-based filtering with a fixed domain
 - **`dangerous_allow_any_host`**: disable domain filtering and serve all matches
 
-You cannot set both `domain` and `dangerous_allow_any_host` at the same time.
+If both `domain` and `dangerous_allow_any_host` are set, `dangerous_allow_any_host`
+takes precedence and `domain` is ignored.
 
 Examples:
 
