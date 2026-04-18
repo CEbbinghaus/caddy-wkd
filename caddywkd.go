@@ -22,6 +22,7 @@ import (
 func init() {
 	caddy.RegisterModule(WKD{})
 	httpcaddyfile.RegisterHandlerDirective("wkd", parseCaddyfile)
+	httpcaddyfile.RegisterDirectiveOrder("wkd", httpcaddyfile.Before, "file_server")
 }
 
 type WKD struct {
