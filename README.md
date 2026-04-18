@@ -15,7 +15,8 @@ wkd * /etc/wkd/keyring.gpg
 wkd * /etc/wkd/keys/
 ```
 
-The `*` is Caddy's "match all" matcher for handler directives in this form.
+> [!IMPORTANT]
+> The `*` is required as caddy treats the first argument as a path matcher if it starts with `/`.
 
 Block form:
 
@@ -39,7 +40,7 @@ Only keys with matching email domains are served.
 
 Modes:
 
-- **Default**: filter by request host
+- **Default**: filter by domain of the request
 - **`domain`**: override host-based filtering with a fixed domain
 - **`dangerous_allow_any_host`**: disable domain filtering and serve all matches
 
@@ -74,7 +75,8 @@ wkd {
   "handler": "wkd",
   "path": "/etc/wkd/keys/",
   "extensions": [".gpg", ".asc"],
-  "domain": "example.com"
+  "domain": "example.com",
+  "dangerous_allow_any_host": true
 }
 ```
 
