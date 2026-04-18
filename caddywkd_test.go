@@ -25,6 +25,8 @@ func TestLoadFileBinaryAndDiscover(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "key.gpg")
 	mustWriteBinaryKey(t, path, entity)
 
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	if err := w.loadFile(path); err != nil {
 		t.Fatalf("loadFile(binary) failed: %v", err)
 	}
@@ -33,7 +35,7 @@ func TestLoadFileBinaryAndDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	found, err := w.Discover(hash)
+	found, err := w.Discover(hash, "")
 	if err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
@@ -48,6 +50,8 @@ func TestLoadFileArmoredAndDiscover(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "key.asc")
 	mustWriteArmoredKey(t, path, entity)
 
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	if err := w.loadFile(path); err != nil {
 		t.Fatalf("loadFile(armored) failed: %v", err)
 	}
@@ -56,7 +60,7 @@ func TestLoadFileArmoredAndDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	found, err := w.Discover(hash)
+	found, err := w.Discover(hash, "")
 	if err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
@@ -75,6 +79,8 @@ func TestLoadDirFiltersByExtensions(t *testing.T) {
 		t.Fatalf("write ignore file failed: %v", err)
 	}
 
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	if err := w.loadDir(dir); err != nil {
 		t.Fatalf("loadDir failed: %v", err)
 	}
@@ -83,25 +89,75 @@ func TestLoadDirFiltersByExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	if _, err := w.Discover(hash); err != nil {
+	if _, err := w.Discover(hash, ""); err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
+}
+
+func TestDiscoverDomainFiltering(t *testing.T) {
+	w := newTestWKD()
+	entityExampleCom := mustNewEntity(t, "dave@example.com")
+	entityExampleOrg := mustNewEntity(t, "dave@example.org")
+
+	w.Provision(caddy.Context{Context: context.Background()})
+
+	w.indexEntities(openpgp.EntityList{entityExampleCom, entityExampleOrg})
+
+	hash, err := wkd.HashAddress("dave@example.com")
+	if err != nil {
+		t.Fatalf("HashAddress failed: %v", err)
+	}
+
+	t.Run("empty_domain_returns_all_matches", func(t *testing.T) {
+		found, err := w.Discover(hash, "")
+		if err != nil {
+			t.Fatalf("Discover expected hit, got error: %v", err)
+		}
+		if len(found) != 2 {
+			t.Fatalf("expected 2 entities, got %d", len(found))
+		}
+	})
+
+	t.Run("matching_domain_returns_matches", func(t *testing.T) {
+		found, err := w.Discover(hash, "example.com")
+		if err != nil {
+			t.Fatalf("Discover expected hit, got error: %v", err)
+		}
+		if len(found) != 1 {
+			t.Fatalf("expected 1 entity, got %d", len(found))
+		}
+	})
+
+	t.Run("non_matching_domain_returns_not_found", func(t *testing.T) {
+		if _, err := w.Discover(hash, "nope.example"); !errors.Is(err, wkd.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("missing_hash_returns_not_found", func(t *testing.T) {
+		if _, err := w.Discover("missing", "example.com"); !errors.Is(err, wkd.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
 }
 
 func TestIndexEntitiesAndDiscoverMiss(t *testing.T) {
 	w := newTestWKD()
 	entity := mustNewEntity(t, "dave@example.com")
+
+	w.Provision(caddy.Context{Context: context.Background()})
+
 	w.indexEntities(openpgp.EntityList{entity})
 
 	hash, err := wkd.HashAddress("dave@example.com")
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	if _, err := w.Discover(hash); err != nil {
+	if _, err := w.Discover(hash, ""); err != nil {
 		t.Fatalf("Discover expected hit, got error: %v", err)
 	}
 
-	if _, err := w.Discover("missing"); !errors.Is(err, wkd.ErrNotFound) {
+	if _, err := w.Discover("missing", ""); !errors.Is(err, wkd.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -115,6 +171,12 @@ func TestValidate(t *testing.T) {
 	w.Path = "/tmp/keys"
 	if err := w.Validate(); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	w.Domain = "example.com"
+	w.DangerousAllowAnyHost = true
+	if err := w.Validate(); err != nil {
+		t.Fatalf("unexpected validation error when both domain and dangerous_allow_any_host are set: %v", err)
 	}
 }
 
@@ -135,6 +197,8 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		d := caddyfile.NewTestDispenser(`wkd {
 	path /etc/wkd/keys
 	extensions .gpg .asc
+	domain example.com
+	dangerous_allow_any_host
 }`)
 		if err := w.UnmarshalCaddyfile(d); err != nil {
 			t.Fatalf("UnmarshalCaddyfile block failed: %v", err)
@@ -144,6 +208,12 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		}
 		if len(w.Extensions) != 2 || w.Extensions[0] != ".gpg" || w.Extensions[1] != ".asc" {
 			t.Fatalf("unexpected extensions: %#v", w.Extensions)
+		}
+		if w.Domain != "example.com" {
+			t.Fatalf("unexpected domain: %q", w.Domain)
+		}
+		if !w.DangerousAllowAnyHost {
+			t.Fatal("expected dangerous_allow_any_host to be true")
 		}
 	})
 }
@@ -173,7 +243,7 @@ func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
 		}
 
 		hash, _ := wkd.HashAddress("erin@example.com")
-		if _, err := w.Discover(hash); err != nil {
+		if _, err := w.Discover(hash, ""); err != nil {
 			t.Fatalf("Discover after file provision failed: %v", err)
 		}
 	})
@@ -188,7 +258,7 @@ func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
 		}
 
 		hash, _ := wkd.HashAddress("erin@example.com")
-		if _, err := w.Discover(hash); err != nil {
+		if _, err := w.Discover(hash, ""); err != nil {
 			t.Fatalf("Discover after directory provision failed: %v", err)
 		}
 	})
@@ -248,7 +318,65 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("hu_miss", func(t *testing.T) {
+	t.Run("host_header_mismatch_returns_404", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+	})
+
+	t.Run("configured_domain_overrides_request_host", func(t *testing.T) {
+		wOverride := cloneWKDForTesting(&w)
+		wOverride.Domain = "example.com"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wOverride.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("dangerous_allow_any_host_bypasses_domain_filtering", func(t *testing.T) {
+		wAnyHost := cloneWKDForTesting(&w)
+		wAnyHost.DangerousAllowAnyHost = true
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wAnyHost.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("dangerous_allow_any_host_takes_precedence_over_domain", func(t *testing.T) {
+		wAnyHost := cloneWKDForTesting(&w)
+		wAnyHost.Domain = "invalid.example"
+		wAnyHost.DangerousAllowAnyHost = true
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wAnyHost.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("missing_key_returns_not_found", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", nil)
 		if err := w.ServeHTTP(rec, req, next); err != nil {
@@ -299,7 +427,7 @@ func TestServeHTTP(t *testing.T) {
 
 func newTestWKD() *WKD {
 	return &WKD{
-		pubkeys: map[string]openpgp.EntityList{},
+		pubkeys: map[string]map[string]openpgp.EntityList{},
 		logger:  zap.NewNop(),
 	}
 }
@@ -344,4 +472,27 @@ func mustWriteArmoredKey(t *testing.T, path string, e *openpgp.Entity) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("close armored writer failed: %v", err)
 	}
+}
+
+func cloneWKDForTesting(w *WKD) WKD {
+	return WKD{
+		Path:                  w.Path,
+		Extensions:            append([]string(nil), w.Extensions...),
+		Domain:                w.Domain,
+		DangerousAllowAnyHost: w.DangerousAllowAnyHost,
+		pubkeys:               clonePubkeysForTesting(w.pubkeys),
+		logger:                w.logger,
+	}
+}
+
+func clonePubkeysForTesting(src map[string]map[string]openpgp.EntityList) map[string]map[string]openpgp.EntityList {
+	dst := make(map[string]map[string]openpgp.EntityList, len(src))
+	for hash, domainMap := range src {
+		copiedDomainMap := make(map[string]openpgp.EntityList, len(domainMap))
+		for domain, entities := range domainMap {
+			copiedDomainMap[domain] = append(openpgp.EntityList(nil), entities...)
+		}
+		dst[hash] = copiedDomainMap
+	}
+	return dst
 }
