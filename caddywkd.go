@@ -235,14 +235,14 @@ func (w *WKD) domainFilter(r *http.Request) string {
 }
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if !strings.HasPrefix(r.URL.Path, wkd.Base) {
+		return next.ServeHTTP(rw, r)
+	}
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		rw.Header().Set("Allow", "GET, HEAD")
 		http.Error(rw, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return nil
-	}
-
-	if !strings.HasPrefix(r.URL.Path, wkd.Base) {
-		return next.ServeHTTP(rw, r)
 	}
 
 	path := strings.TrimPrefix(r.URL.Path, wkd.Base)
