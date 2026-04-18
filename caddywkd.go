@@ -2,6 +2,7 @@ package caddywkd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/caddyserver/caddy/v2"
@@ -44,8 +47,9 @@ func init() {
 }
 
 type WKD struct {
-	Path       string   `json:"path"`
-	Extensions []string `json:"extensions,omitempty"`
+	Path       string         `json:"path"`
+	Extensions []string       `json:"extensions,omitempty"`
+	Rescan     caddy.Duration `json:"rescan,omitempty"`
 
 	// Override domain for key filtering. If set, keys are filtered
 	// against this domain instead of the request Host header.
@@ -58,6 +62,8 @@ type WKD struct {
 	// public key dictionary split [domain][username_hash] with domain="" containing all keys for a given username
 	pubkeys map[string]map[string]openpgp.EntityList
 	logger  *zap.Logger
+	mu      sync.RWMutex
+	cancel  context.CancelFunc
 }
 
 var defaultExtensions = []string{".gpg", ".asc", ".pub", ".key"}
@@ -71,36 +77,64 @@ func (WKD) CaddyModule() caddy.ModuleInfo {
 
 func (w *WKD) Provision(ctx caddy.Context) error {
 	w.logger = ctx.Logger(w)
-	w.pubkeys = map[string]map[string]openpgp.EntityList{
-		"": make(map[string]openpgp.EntityList),
-	}
 
 	if len(w.Extensions) == 0 {
 		w.Extensions = defaultExtensions
 	}
 
-	info, err := os.Stat(w.Path)
+	pubkeys, err := w.loadKeys()
 	if err != nil {
-		return fmt.Errorf("cannot access path %s: %w", w.Path, err)
-	}
-
-	if info.IsDir() {
-		if err := w.loadDir(w.Path); err != nil {
-			return err
-		}
-	} else if err := w.loadFile(w.Path); err != nil {
 		return err
 	}
 
+	w.mu.Lock()
+	w.pubkeys = pubkeys
+	w.mu.Unlock()
+
+	if w.Rescan > 0 {
+		rctx, cancel := context.WithCancel(ctx)
+		w.cancel = cancel
+		go w.rescanLoop(rctx, time.Duration(w.Rescan))
+	}
+
+	w.mu.RLock()
+	identities := len(w.pubkeys[""])
+	w.mu.RUnlock()
+
 	w.logger.Info("loaded WKD keys",
-		zap.Int("identities", len(w.pubkeys[""])),
+		zap.Int("identities", identities),
 		zap.String("path", w.Path),
 	)
 
 	return nil
 }
 
+func (w *WKD) loadKeys() (map[string]map[string]openpgp.EntityList, error) {
+	pubkeys := map[string]map[string]openpgp.EntityList{
+		"": make(map[string]openpgp.EntityList),
+	}
+
+	info, err := os.Stat(w.Path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot access path %s: %w", w.Path, err)
+	}
+
+	if info.IsDir() {
+		if err := w.loadDirInto(w.Path, pubkeys); err != nil {
+			return nil, err
+		}
+	} else if err := w.loadFileInto(w.Path, pubkeys); err != nil {
+		return nil, err
+	}
+
+	return pubkeys, nil
+}
+
 func (w *WKD) loadFile(path string) error {
+	return w.loadFileInto(path, w.pubkeys)
+}
+
+func (w *WKD) loadFileInto(path string, pubkeys map[string]map[string]openpgp.EntityList) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -118,11 +152,15 @@ func (w *WKD) loadFile(path string) error {
 		}
 	}
 
-	w.indexEntities(el)
+	w.indexEntitiesInto(el, pubkeys)
 	return nil
 }
 
 func (w *WKD) loadDir(dir string) error {
+	return w.loadDirInto(dir, w.pubkeys)
+}
+
+func (w *WKD) loadDirInto(dir string, pubkeys map[string]map[string]openpgp.EntityList) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -143,7 +181,7 @@ func (w *WKD) loadDir(dir string) error {
 		}
 
 		path := filepath.Join(dir, entry.Name())
-		if err := w.loadFile(path); err != nil {
+		if err := w.loadFileInto(path, pubkeys); err != nil {
 			return err
 		}
 		w.logger.Debug("loaded key file", zap.String("file", entry.Name()))
@@ -163,6 +201,10 @@ func emailDomain(email string) (string, bool) {
 }
 
 func (w *WKD) indexEntities(el openpgp.EntityList) {
+	w.indexEntitiesInto(el, w.pubkeys)
+}
+
+func (w *WKD) indexEntitiesInto(el openpgp.EntityList, pubkeys map[string]map[string]openpgp.EntityList) {
 	for _, e := range el {
 		for _, ident := range e.Identities {
 			if ident == nil || ident.UserId == nil {
@@ -180,7 +222,7 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 				continue
 			}
 
-			w.pubkeys[""][hash] = append(w.pubkeys[""][hash], e)
+			pubkeys[""][hash] = append(pubkeys[""][hash], e)
 
 			domain, ok := emailDomain(email)
 			if !ok {
@@ -190,11 +232,11 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 				continue
 			}
 
-			if _, ok := w.pubkeys[domain]; !ok {
-				w.pubkeys[domain] = make(map[string]openpgp.EntityList)
+			if _, ok := pubkeys[domain]; !ok {
+				pubkeys[domain] = make(map[string]openpgp.EntityList)
 			}
 
-			w.pubkeys[domain][hash] = append(w.pubkeys[domain][hash], e)
+			pubkeys[domain][hash] = append(pubkeys[domain][hash], e)
 		}
 	}
 }
@@ -203,10 +245,16 @@ func (w *WKD) Validate() error {
 	if w.Path == "" {
 		return fmt.Errorf("path is required")
 	}
+	if w.Rescan > 0 && time.Duration(w.Rescan) < time.Second {
+		return fmt.Errorf("rescan interval must be at least 1s")
+	}
 	return nil
 }
 
 func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
 	domainKeys, ok := w.pubkeys[strings.ToLower(domain)]
 	if !ok {
 		return nil, wkd.ErrNotFound
@@ -306,6 +354,16 @@ func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 
+			case "rescan":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid rescan duration: %v", err)
+				}
+				w.Rescan = caddy.Duration(dur)
+
 			case "domain":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -323,6 +381,40 @@ func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
+func (w *WKD) rescanLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fresh, err := w.loadKeys()
+			if err != nil {
+				w.logger.Error("rescan failed", zap.Error(err))
+				continue
+			}
+
+			w.mu.Lock()
+			w.pubkeys = fresh
+			w.mu.Unlock()
+
+			w.logger.Info("rescanned WKD keys",
+				zap.Int("identities", len(fresh[""])),
+				zap.String("path", w.Path),
+			)
+		}
+	}
+}
+
+func (w *WKD) Cleanup() error {
+	if w.cancel != nil {
+		w.cancel()
+	}
+	return nil
+}
+
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var w WKD
 	err := w.UnmarshalCaddyfile(h.Dispenser)
@@ -333,6 +425,7 @@ var (
 	_ caddy.Module                = (*WKD)(nil)
 	_ caddy.Provisioner           = (*WKD)(nil)
 	_ caddy.Validator             = (*WKD)(nil)
+	_ caddy.CleanerUpper          = (*WKD)(nil)
 	_ caddyhttp.MiddlewareHandler = (*WKD)(nil)
 	_ caddyfile.Unmarshaler       = (*WKD)(nil)
 )
