@@ -33,7 +33,7 @@ func TestLoadFileBinaryAndDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	found, err := w.Discover(hash)
+	found, err := w.Discover(hash, "")
 	if err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestLoadFileArmoredAndDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	found, err := w.Discover(hash)
+	found, err := w.Discover(hash, "")
 	if err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
@@ -83,9 +83,53 @@ func TestLoadDirFiltersByExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	if _, err := w.Discover(hash); err != nil {
+	if _, err := w.Discover(hash, ""); err != nil {
 		t.Fatalf("Discover failed: %v", err)
 	}
+}
+
+func TestDiscoverDomainFiltering(t *testing.T) {
+	w := newTestWKD()
+	entityExampleCom := mustNewEntity(t, "dave@example.com")
+	entityExampleOrg := mustNewEntity(t, "dave@example.org")
+	w.indexEntities(openpgp.EntityList{entityExampleCom, entityExampleOrg})
+
+	hash, err := wkd.HashAddress("dave@example.com")
+	if err != nil {
+		t.Fatalf("HashAddress failed: %v", err)
+	}
+
+	t.Run("empty_domain_returns_all_matches", func(t *testing.T) {
+		found, err := w.Discover(hash, "")
+		if err != nil {
+			t.Fatalf("Discover expected hit, got error: %v", err)
+		}
+		if len(found) != 2 {
+			t.Fatalf("expected 2 entities, got %d", len(found))
+		}
+	})
+
+	t.Run("matching_domain_returns_matches", func(t *testing.T) {
+		found, err := w.Discover(hash, "example.com")
+		if err != nil {
+			t.Fatalf("Discover expected hit, got error: %v", err)
+		}
+		if len(found) != 1 {
+			t.Fatalf("expected 1 entity, got %d", len(found))
+		}
+	})
+
+	t.Run("non_matching_domain_returns_not_found", func(t *testing.T) {
+		if _, err := w.Discover(hash, "nope.example"); !errors.Is(err, wkd.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("missing_hash_returns_not_found", func(t *testing.T) {
+		if _, err := w.Discover("missing", "example.com"); !errors.Is(err, wkd.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
 }
 
 func TestIndexEntitiesAndDiscoverMiss(t *testing.T) {
@@ -97,11 +141,11 @@ func TestIndexEntitiesAndDiscoverMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashAddress failed: %v", err)
 	}
-	if _, err := w.Discover(hash); err != nil {
+	if _, err := w.Discover(hash, ""); err != nil {
 		t.Fatalf("Discover expected hit, got error: %v", err)
 	}
 
-	if _, err := w.Discover("missing"); !errors.Is(err, wkd.ErrNotFound) {
+	if _, err := w.Discover("missing", ""); !errors.Is(err, wkd.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -115,6 +159,12 @@ func TestValidate(t *testing.T) {
 	w.Path = "/tmp/keys"
 	if err := w.Validate(); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	w.Domain = "example.com"
+	w.DangerousAllowAnyHost = true
+	if err := w.Validate(); err == nil {
+		t.Fatal("expected validation error when both domain and dangerous_allow_any_host are set")
 	}
 }
 
@@ -135,6 +185,8 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		d := caddyfile.NewTestDispenser(`wkd {
 	path /etc/wkd/keys
 	extensions .gpg .asc
+	domain example.com
+	dangerous_allow_any_host
 }`)
 		if err := w.UnmarshalCaddyfile(d); err != nil {
 			t.Fatalf("UnmarshalCaddyfile block failed: %v", err)
@@ -144,6 +196,12 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		}
 		if len(w.Extensions) != 2 || w.Extensions[0] != ".gpg" || w.Extensions[1] != ".asc" {
 			t.Fatalf("unexpected extensions: %#v", w.Extensions)
+		}
+		if w.Domain != "example.com" {
+			t.Fatalf("unexpected domain: %q", w.Domain)
+		}
+		if !w.DangerousAllowAnyHost {
+			t.Fatal("expected dangerous_allow_any_host to be true")
 		}
 	})
 }
@@ -173,7 +231,7 @@ func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
 		}
 
 		hash, _ := wkd.HashAddress("erin@example.com")
-		if _, err := w.Discover(hash); err != nil {
+		if _, err := w.Discover(hash, ""); err != nil {
 			t.Fatalf("Discover after file provision failed: %v", err)
 		}
 	})
@@ -188,7 +246,7 @@ func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
 		}
 
 		hash, _ := wkd.HashAddress("erin@example.com")
-		if _, err := w.Discover(hash); err != nil {
+		if _, err := w.Discover(hash, ""); err != nil {
 			t.Fatalf("Discover after directory provision failed: %v", err)
 		}
 	})
@@ -245,6 +303,48 @@ func TestServeHTTP(t *testing.T) {
 		}
 		if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
 			t.Fatalf("expected Content-Type application/octet-stream, got %q", ct)
+		}
+	})
+
+	t.Run("hu_host_mismatch", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+	})
+
+	t.Run("hu_domain_override", func(t *testing.T) {
+		wOverride := w
+		wOverride.Domain = "example.com"
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wOverride.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("hu_allow_any_host", func(t *testing.T) {
+		wAnyHost := w
+		wAnyHost.DangerousAllowAnyHost = true
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		req.Host = "example.org"
+		if err := wAnyHost.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
 		}
 	})
 

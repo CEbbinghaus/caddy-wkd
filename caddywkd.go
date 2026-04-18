@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +29,14 @@ func init() {
 type WKD struct {
 	Path       string   `json:"path"`
 	Extensions []string `json:"extensions,omitempty"`
+
+	// Override domain for key filtering. If set, keys are filtered
+	// against this domain instead of the request Host header.
+	Domain string `json:"domain,omitempty"`
+
+	// Skip domain filtering entirely. Serves all keys regardless
+	// of domain. Use with caution.
+	DangerousAllowAnyHost bool `json:"dangerous_allow_any_host,omitempty"`
 
 	pubkeys map[string]openpgp.EntityList
 	logger  *zap.Logger
@@ -147,15 +156,43 @@ func (w *WKD) Validate() error {
 	if w.Path == "" {
 		return fmt.Errorf("path is required")
 	}
+	if w.Domain != "" && w.DangerousAllowAnyHost {
+		return fmt.Errorf("cannot set both 'domain' and 'dangerous_allow_any_host'")
+	}
 	return nil
 }
 
-func (w *WKD) Discover(hash string) ([]*openpgp.Entity, error) {
+func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
 	pubkey, ok := w.pubkeys[hash]
 	if !ok {
 		return nil, wkd.ErrNotFound
 	}
-	return pubkey, nil
+
+	// No domain filter — return all matches.
+	if domain == "" {
+		return pubkey, nil
+	}
+
+	// Filter to only entities with a matching domain.
+	var matched []*openpgp.Entity
+	for _, e := range pubkey {
+		for _, ident := range e.Identities {
+			if ident == nil || ident.UserId == nil {
+				continue
+			}
+			parts := strings.SplitN(ident.UserId.Email, "@", 2)
+			if len(parts) == 2 && strings.EqualFold(parts[1], domain) {
+				matched = append(matched, e)
+				break
+			}
+		}
+	}
+
+	if len(matched) == 0 {
+		return nil, wkd.ErrNotFound
+	}
+
+	return matched, nil
 }
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -183,7 +220,22 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 			http.NotFound(rw, r)
 			return nil
 		}
-		pubkeys, err := w.Discover(hash)
+
+		// Determine the domain to filter by.
+		domain := ""
+		if !w.DangerousAllowAnyHost {
+			if w.Domain != "" {
+				domain = w.Domain
+			} else {
+				domain = r.Host
+				if h, _, err := net.SplitHostPort(domain); err == nil {
+					domain = h
+				}
+			}
+		}
+
+		// Pass domain to Discover; empty string means no filtering.
+		pubkeys, err := w.Discover(hash, domain)
 		if errors.Is(err, wkd.ErrNotFound) {
 			http.NotFound(rw, r)
 			return nil
@@ -227,6 +279,15 @@ func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if len(w.Extensions) == 0 {
 					return d.ArgErr()
 				}
+
+			case "domain":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				w.Domain = d.Val()
+
+			case "dangerous_allow_any_host":
+				w.DangerousAllowAnyHost = true
 
 			default:
 				return d.Errf("unknown directive: %s", d.Val())
