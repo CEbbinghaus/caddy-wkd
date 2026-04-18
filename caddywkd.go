@@ -44,6 +44,8 @@ type WKD struct {
 
 var defaultExtensions = []string{".gpg", ".asc", ".pub", ".key"}
 
+const emailAtSeparatorCount = 1
+
 func (WKD) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.wkd",
@@ -180,7 +182,11 @@ func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
 			if ident == nil || ident.UserId == nil {
 				continue
 			}
-			parts := strings.SplitN(ident.UserId.Email, "@", 2)
+			email := ident.UserId.Email
+			if email == "" || strings.Count(email, "@") != emailAtSeparatorCount {
+				continue
+			}
+			parts := strings.SplitN(email, "@", 2)
 			if len(parts) == 2 && strings.EqualFold(parts[1], domain) {
 				matched = append(matched, e)
 				break

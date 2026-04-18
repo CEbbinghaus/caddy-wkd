@@ -306,7 +306,7 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("hu_host_mismatch", func(t *testing.T) {
+	t.Run("host_header_mismatch_returns_404", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
 		req.Host = "example.org"
@@ -318,8 +318,8 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("hu_domain_override", func(t *testing.T) {
-		wOverride := w
+	t.Run("configured_domain_overrides_request_host", func(t *testing.T) {
+		wOverride := cloneWKDForTesting(&w)
 		wOverride.Domain = "example.com"
 
 		rec := httptest.NewRecorder()
@@ -333,8 +333,8 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("hu_allow_any_host", func(t *testing.T) {
-		wAnyHost := w
+	t.Run("dangerous_allow_any_host_bypasses_domain_filtering", func(t *testing.T) {
+		wAnyHost := cloneWKDForTesting(&w)
 		wAnyHost.DangerousAllowAnyHost = true
 
 		rec := httptest.NewRecorder()
@@ -348,7 +348,7 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("hu_miss", func(t *testing.T) {
+	t.Run("missing_key_returns_not_found", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", nil)
 		if err := w.ServeHTTP(rec, req, next); err != nil {
@@ -443,5 +443,20 @@ func mustWriteArmoredKey(t *testing.T, path string, e *openpgp.Entity) {
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("close armored writer failed: %v", err)
+	}
+}
+
+func cloneWKDForTesting(w *WKD) WKD {
+	pubkeys := make(map[string]openpgp.EntityList, len(w.pubkeys))
+	for hash, entities := range w.pubkeys {
+		pubkeys[hash] = append(openpgp.EntityList(nil), entities...)
+	}
+	return WKD{
+		Path:                  w.Path,
+		Extensions:            append([]string(nil), w.Extensions...),
+		Domain:                w.Domain,
+		DangerousAllowAnyHost: w.DangerousAllowAnyHost,
+		pubkeys:               pubkeys,
+		logger:                w.logger,
 	}
 }

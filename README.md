@@ -15,6 +15,8 @@ wkd * /etc/wkd/keyring.gpg
 wkd * /etc/wkd/keys/
 ```
 
+The `*` is Caddy's "match all" matcher for handler directives in this form.
+
 Block form:
 
 ```caddyfile
