@@ -13,6 +13,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/emersion/go-openpgp-wkd"
 	"go.uber.org/zap"
@@ -145,6 +146,16 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			t.Fatalf("unexpected extensions: %#v", w.Extensions)
 		}
 	})
+}
+
+func TestCaddyfileAdapterAcceptsWKDDirective(t *testing.T) {
+	adapter := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}
+	_, _, err := adapter.Adapt([]byte(`:80 {
+	wkd /etc/wkd/keys
+}`), nil)
+	if err != nil {
+		t.Fatalf("expected Caddyfile adaptation to succeed with wkd directive, got: %v", err)
+	}
 }
 
 func TestProvisionAutoDetectsFileOrDirectory(t *testing.T) {
