@@ -40,7 +40,7 @@ func isValidWKDHash(s string) bool {
 func init() {
 	caddy.RegisterModule(WKD{})
 	httpcaddyfile.RegisterHandlerDirective("wkd", parseCaddyfile)
-	httpcaddyfile.RegisterDirectiveOrder("wkd", httpcaddyfile.Before, "file_server")
+	httpcaddyfile.RegisterDirectiveOrder("wkd", httpcaddyfile.Before, "reverse_proxy")
 }
 
 type WKD struct {
