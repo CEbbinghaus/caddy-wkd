@@ -235,6 +235,7 @@ func (w *WKD) domainFilter(r *http.Request) string {
 }
 
 func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// !!!!!!We must **ALWAYS** check HasPrefix before any other checks, and call next.ServeHTTP if it doesn't match!!!!!!!
 	if !strings.HasPrefix(r.URL.Path, wkd.Base) {
 		return next.ServeHTTP(rw, r)
 	}
