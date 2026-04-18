@@ -16,9 +16,26 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/emersion/go-openpgp-wkd"
+	wkd "github.com/emersion/go-openpgp-wkd"
 	"go.uber.org/zap"
 )
+
+// zbase32Alphabet is the alphabet used by z-base-32 encoding (RFC 6189 / Zooko's base32).
+const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
+
+// isValidWKDHash returns true if s looks like a valid WKD hash:
+// exactly 32 characters from the z-base-32 alphabet.
+func isValidWKDHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune(zbase32Alphabet, c) {
+			return false
+		}
+	}
+	return true
+}
 
 func init() {
 	caddy.RegisterModule(WKD{})
@@ -38,6 +55,7 @@ type WKD struct {
 	// of domain. Use with caution.
 	DangerousAllowAnyHost bool `json:"dangerous_allow_any_host,omitempty"`
 
+	// public key dictionary split [domain][username_hash] with domain="" containing all keys for a given username
 	pubkeys map[string]map[string]openpgp.EntityList
 	logger  *zap.Logger
 }
@@ -53,7 +71,9 @@ func (WKD) CaddyModule() caddy.ModuleInfo {
 
 func (w *WKD) Provision(ctx caddy.Context) error {
 	w.logger = ctx.Logger(w)
-	w.pubkeys = map[string]map[string]openpgp.EntityList{}
+	w.pubkeys = map[string]map[string]openpgp.EntityList{
+		"": make(map[string]openpgp.EntityList),
+	}
 
 	if len(w.Extensions) == 0 {
 		w.Extensions = defaultExtensions
@@ -132,6 +152,17 @@ func (w *WKD) loadDir(dir string) error {
 	return nil
 }
 
+func emailDomain(email string) (string, bool) {
+	if email == "" || strings.Count(email, "@") != 1 {
+		return "", false
+	}
+	parts := strings.SplitN(email, "@", 2)
+	if parts[1] == "" {
+		return "", false
+	}
+	return strings.ToLower(parts[1]), true
+}
+
 func (w *WKD) indexEntities(el openpgp.EntityList) {
 	for _, e := range el {
 		for _, ident := range e.Identities {
@@ -141,6 +172,7 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 
 			email := ident.UserId.Email
 			hash, err := wkd.HashAddress(email)
+
 			if err != nil {
 				w.logger.Warn("failed to hash address",
 					zap.String("email", email),
@@ -148,18 +180,22 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 				)
 				continue
 			}
-			domainKeys := w.pubkeys[hash]
-			if domainKeys == nil {
-				domainKeys = make(map[string]openpgp.EntityList)
-				w.pubkeys[hash] = domainKeys
-			}
-			domainKeys[""] = append(domainKeys[""], e)
+
+			w.pubkeys[""][hash] = append(w.pubkeys[""][hash], e)
 
 			domain, ok := emailDomain(email)
 			if !ok {
+				w.logger.Warn("failed to extract domain from email",
+					zap.String("email", email),
+				)
 				continue
 			}
-			domainKeys[domain] = append(domainKeys[domain], e)
+
+			if _, ok := w.pubkeys[domain]; !ok {
+				w.pubkeys[domain] = make(map[string]openpgp.EntityList)
+			}
+
+			w.pubkeys[domain][hash] = append(w.pubkeys[domain][hash], e)
 		}
 	}
 }
@@ -172,23 +208,16 @@ func (w *WKD) Validate() error {
 }
 
 func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
-	domainKeys, ok := w.pubkeys[hash]
+	domainKeys, ok := w.pubkeys[strings.ToLower(domain)]
 	if !ok {
 		return nil, wkd.ErrNotFound
 	}
 
-	if domain == "" {
-		all := domainKeys[""]
-		if len(all) == 0 {
-			return nil, wkd.ErrNotFound
-		}
-		return all, nil
-	}
-
-	matched := domainKeys[strings.ToLower(domain)]
+	matched := domainKeys[hash]
 	if len(matched) == 0 {
 		return nil, wkd.ErrNotFound
 	}
+
 	return matched, nil
 }
 
@@ -237,6 +266,7 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 			http.NotFound(rw, r)
 			return nil
 		}
+
 		if err != nil {
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return nil
@@ -255,17 +285,6 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 
 	http.NotFound(rw, r)
 	return nil
-}
-
-func emailDomain(email string) (string, bool) {
-	if email == "" || strings.Count(email, "@") != 1 {
-		return "", false
-	}
-	parts := strings.SplitN(email, "@", 2)
-	if parts[1] == "" {
-		return "", false
-	}
-	return strings.ToLower(parts[1]), true
 }
 
 func (w *WKD) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -309,23 +328,6 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	var w WKD
 	err := w.UnmarshalCaddyfile(h.Dispenser)
 	return &w, err
-}
-
-// zbase32Alphabet is the alphabet used by z-base-32 encoding (RFC 6189 / Zooko's base32).
-const zbase32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
-
-// isValidWKDHash returns true if s looks like a valid WKD hash:
-// exactly 32 characters from the z-base-32 alphabet.
-func isValidWKDHash(s string) bool {
-	if len(s) != 32 {
-		return false
-	}
-	for _, c := range s {
-		if !strings.ContainsRune(zbase32Alphabet, c) {
-			return false
-		}
-	}
-	return true
 }
 
 var (
