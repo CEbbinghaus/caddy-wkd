@@ -38,9 +38,8 @@ type WKD struct {
 	// of domain. Use with caution.
 	DangerousAllowAnyHost bool `json:"dangerous_allow_any_host,omitempty"`
 
-	pubkeys         map[string]openpgp.EntityList
-	pubkeysByDomain map[string]map[string]openpgp.EntityList
-	logger          *zap.Logger
+	pubkeys map[string]map[string]openpgp.EntityList
+	logger  *zap.Logger
 }
 
 var defaultExtensions = []string{".gpg", ".asc", ".pub", ".key"}
@@ -54,8 +53,7 @@ func (WKD) CaddyModule() caddy.ModuleInfo {
 
 func (w *WKD) Provision(ctx caddy.Context) error {
 	w.logger = ctx.Logger(w)
-	w.pubkeys = map[string]openpgp.EntityList{}
-	w.pubkeysByDomain = map[string]map[string]openpgp.EntityList{}
+	w.pubkeys = map[string]map[string]openpgp.EntityList{}
 
 	if len(w.Extensions) == 0 {
 		w.Extensions = defaultExtensions
@@ -150,16 +148,16 @@ func (w *WKD) indexEntities(el openpgp.EntityList) {
 				)
 				continue
 			}
-			w.pubkeys[hash] = append(w.pubkeys[hash], e)
+			domainKeys := w.pubkeys[hash]
+			if domainKeys == nil {
+				domainKeys = make(map[string]openpgp.EntityList)
+				w.pubkeys[hash] = domainKeys
+			}
+			domainKeys[""] = append(domainKeys[""], e)
 
 			domain, ok := emailDomain(email)
 			if !ok {
 				continue
-			}
-			domainKeys := w.pubkeysByDomain[hash]
-			if domainKeys == nil {
-				domainKeys = make(map[string]openpgp.EntityList)
-				w.pubkeysByDomain[hash] = domainKeys
 			}
 			domainKeys[domain] = append(domainKeys[domain], e)
 		}
@@ -174,20 +172,19 @@ func (w *WKD) Validate() error {
 }
 
 func (w *WKD) Discover(hash, domain string) ([]*openpgp.Entity, error) {
-	pubkey, ok := w.pubkeys[hash]
+	domainKeys, ok := w.pubkeys[hash]
 	if !ok {
 		return nil, wkd.ErrNotFound
 	}
 
-	// No domain filter — return all matches.
 	if domain == "" {
-		return pubkey, nil
+		all := domainKeys[""]
+		if len(all) == 0 {
+			return nil, wkd.ErrNotFound
+		}
+		return all, nil
 	}
 
-	domainKeys, ok := w.pubkeysByDomain[hash]
-	if !ok {
-		return nil, wkd.ErrNotFound
-	}
 	matched := domainKeys[strings.ToLower(domain)]
 	if len(matched) == 0 {
 		return nil, wkd.ErrNotFound

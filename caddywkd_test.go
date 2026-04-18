@@ -415,9 +415,8 @@ func TestServeHTTP(t *testing.T) {
 
 func newTestWKD() *WKD {
 	return &WKD{
-		pubkeys:         map[string]openpgp.EntityList{},
-		pubkeysByDomain: map[string]map[string]openpgp.EntityList{},
-		logger:          zap.NewNop(),
+		pubkeys: map[string]map[string]openpgp.EntityList{},
+		logger:  zap.NewNop(),
 	}
 }
 
@@ -464,22 +463,17 @@ func mustWriteArmoredKey(t *testing.T, path string, e *openpgp.Entity) {
 }
 
 func cloneWKDForTesting(w *WKD) WKD {
-	pubkeys := make(map[string]openpgp.EntityList, len(w.pubkeys))
-	for hash, entities := range w.pubkeys {
-		pubkeys[hash] = append(openpgp.EntityList(nil), entities...)
-	}
 	return WKD{
 		Path:                  w.Path,
 		Extensions:            append([]string(nil), w.Extensions...),
 		Domain:                w.Domain,
 		DangerousAllowAnyHost: w.DangerousAllowAnyHost,
-		pubkeys:               pubkeys,
-		pubkeysByDomain:       clonePubkeysByDomainForTesting(w.pubkeysByDomain),
+		pubkeys:               clonePubkeysForTesting(w.pubkeys),
 		logger:                w.logger,
 	}
 }
 
-func clonePubkeysByDomainForTesting(src map[string]map[string]openpgp.EntityList) map[string]map[string]openpgp.EntityList {
+func clonePubkeysForTesting(src map[string]map[string]openpgp.EntityList) map[string]map[string]openpgp.EntityList {
 	dst := make(map[string]map[string]openpgp.EntityList, len(src))
 	for hash, domainMap := range src {
 		copiedDomainMap := make(map[string]openpgp.EntityList, len(domainMap))
