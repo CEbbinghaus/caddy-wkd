@@ -24,6 +24,7 @@ Block form:
 wkd {
     path /etc/wkd/keys/
     extensions .gpg .asc .pub .key
+    rescan 5m
 }
 ```
 
@@ -32,6 +33,9 @@ If `path` is a directory, all files matching `extensions` are loaded. Only
 files in the top-level of the directory are read — subdirectories are not
 scanned recursively.
 If `extensions` is omitted, defaults are: `.gpg`, `.asc`, `.pub`, `.key`.
+If `rescan` is omitted or set to `0`, keys are loaded once at startup. Set
+`rescan` to periodically reload keys in the background, or use `caddy reload`
+to pick up changes.
 
 ### Domain Filtering
 
@@ -59,6 +63,7 @@ example.com {
 wkd {
     path /etc/wkd/keys/
     domain example.com
+    rescan 5m
 }
 
 # No domain filtering (dangerous)
@@ -75,10 +80,13 @@ wkd {
   "handler": "wkd",
   "path": "/etc/wkd/keys/",
   "extensions": [".gpg", ".asc"],
+  "rescan": 300000000000,
   "domain": "example.com",
   "dangerous_allow_any_host": true
 }
 ```
+
+`rescan` in JSON uses Go duration nanoseconds (`300000000000` = `5m`).
 
 ## License
 

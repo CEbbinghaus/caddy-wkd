@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
@@ -42,6 +43,53 @@ func TestLoadFileBinaryAndDiscover(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("expected 1 entity, got %d", len(found))
 	}
+}
+
+func TestLoadKeys(t *testing.T) {
+	t.Run("file", func(t *testing.T) {
+		entity := mustNewEntity(t, "alice@example.com")
+		path := filepath.Join(t.TempDir(), "key.gpg")
+		mustWriteBinaryKey(t, path, entity)
+
+		w := newTestWKD()
+		w.Path = path
+
+		pubkeys, err := w.loadKeys()
+		if err != nil {
+			t.Fatalf("loadKeys(file) failed: %v", err)
+		}
+
+		hash, err := wkd.HashAddress("alice@example.com")
+		if err != nil {
+			t.Fatalf("HashAddress failed: %v", err)
+		}
+		if len(pubkeys[""][hash]) != 1 {
+			t.Fatalf("expected 1 key for hash, got %d", len(pubkeys[""][hash]))
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		entity := mustNewEntity(t, "bob@example.com")
+		dir := t.TempDir()
+		mustWriteArmoredKey(t, filepath.Join(dir, "bob.asc"), entity)
+
+		w := newTestWKD()
+		w.Path = dir
+		w.Extensions = []string{".asc"}
+
+		pubkeys, err := w.loadKeys()
+		if err != nil {
+			t.Fatalf("loadKeys(directory) failed: %v", err)
+		}
+
+		hash, err := wkd.HashAddress("bob@example.com")
+		if err != nil {
+			t.Fatalf("HashAddress failed: %v", err)
+		}
+		if len(pubkeys[""][hash]) != 1 {
+			t.Fatalf("expected 1 key for hash, got %d", len(pubkeys[""][hash]))
+		}
+	})
 }
 
 func TestLoadFileArmoredAndDiscover(t *testing.T) {
@@ -178,6 +226,17 @@ func TestValidate(t *testing.T) {
 	if err := w.Validate(); err != nil {
 		t.Fatalf("unexpected validation error when both domain and dangerous_allow_any_host are set: %v", err)
 	}
+
+	w.DangerousAllowAnyHost = false
+	w.Rescan = caddy.Duration(500 * time.Millisecond)
+	if err := w.Validate(); err == nil {
+		t.Fatal("expected validation error for rescan interval less than 1s")
+	}
+
+	w.Rescan = caddy.Duration(time.Second)
+	if err := w.Validate(); err != nil {
+		t.Fatalf("unexpected validation error for valid rescan interval: %v", err)
+	}
 }
 
 func TestUnmarshalCaddyfile(t *testing.T) {
@@ -197,6 +256,7 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		d := caddyfile.NewTestDispenser(`wkd {
 	path /etc/wkd/keys
 	extensions .gpg .asc
+	rescan 5m
 	domain example.com
 	dangerous_allow_any_host
 }`)
@@ -209,11 +269,25 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		if len(w.Extensions) != 2 || w.Extensions[0] != ".gpg" || w.Extensions[1] != ".asc" {
 			t.Fatalf("unexpected extensions: %#v", w.Extensions)
 		}
+		if w.Rescan != caddy.Duration(5*time.Minute) {
+			t.Fatalf("unexpected rescan: %v", time.Duration(w.Rescan))
+		}
 		if w.Domain != "example.com" {
 			t.Fatalf("unexpected domain: %q", w.Domain)
 		}
 		if !w.DangerousAllowAnyHost {
 			t.Fatal("expected dangerous_allow_any_host to be true")
+		}
+	})
+
+	t.Run("invalid_rescan", func(t *testing.T) {
+		var w WKD
+		d := caddyfile.NewTestDispenser(`wkd {
+	path /etc/wkd/keys
+	rescan not-a-duration
+}`)
+		if err := w.UnmarshalCaddyfile(d); err == nil {
+			t.Fatal("expected unmarshal error for invalid rescan duration")
 		}
 	})
 }
@@ -425,10 +499,27 @@ func TestServeHTTP(t *testing.T) {
 	})
 }
 
+func TestCleanupCancelsRescanContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &WKD{cancel: cancel}
+
+	if err := w.Cleanup(); err != nil {
+		t.Fatalf("Cleanup failed: %v", err)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected context cancellation")
+	}
+}
+
 func newTestWKD() *WKD {
 	return &WKD{
-		pubkeys: map[string]map[string]openpgp.EntityList{},
-		logger:  zap.NewNop(),
+		pubkeys: map[string]map[string]openpgp.EntityList{
+			"": make(map[string]openpgp.EntityList),
+		},
+		logger: zap.NewNop(),
 	}
 }
 
@@ -478,6 +569,7 @@ func cloneWKDForTesting(w *WKD) WKD {
 	return WKD{
 		Path:                  w.Path,
 		Extensions:            append([]string(nil), w.Extensions...),
+		Rescan:                w.Rescan,
 		Domain:                w.Domain,
 		DangerousAllowAnyHost: w.DangerousAllowAnyHost,
 		pubkeys:               clonePubkeysForTesting(w.pubkeys),
