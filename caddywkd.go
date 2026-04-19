@@ -247,15 +247,24 @@ func (w *WKD) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.
 	}
 
 	path := strings.TrimPrefix(r.URL.Path, wkd.Base)
+	subpath := path
+	if !strings.HasPrefix(path, "/hu/") && path != "/policy" && strings.HasPrefix(path, "/") {
+		// Support WKD advanced method by stripping an optional domain
+		// prefix from paths like "/<domain>/hu/<hash>" and "/<domain>/policy".
+		if idx := strings.Index(path[1:], "/"); idx >= 0 {
+			subpath = path[1+idx:]
+		}
+	}
+
 	switch {
-	case path == "/policy":
+	case subpath == "/policy":
 		if _, err := fmt.Fprintf(rw, "protocol-version: %v\n", wkd.Version); err != nil {
 			return err
 		}
 		return nil
 
-	case strings.HasPrefix(path, "/hu/"):
-		hash := strings.TrimPrefix(path, "/hu/")
+	case strings.HasPrefix(subpath, "/hu/"):
+		hash := strings.TrimPrefix(subpath, "/hu/")
 		if !isValidWKDHash(hash) {
 			http.NotFound(rw, r)
 			return nil

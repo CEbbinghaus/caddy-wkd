@@ -301,9 +301,40 @@ func TestServeHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("advanced_policy", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/example.com/policy", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if body := rec.Body.String(); body == "" {
+			t.Fatal("expected non-empty policy body")
+		}
+	})
+
 	t.Run("hu_hit", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/hu/"+validHash, nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatal("expected non-empty key body")
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+			t.Fatalf("expected Content-Type application/octet-stream, got %q", ct)
+		}
+	})
+
+	t.Run("advanced_hu_hit", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+validHash, nil)
 		if err := w.ServeHTTP(rec, req, next); err != nil {
 			t.Fatalf("ServeHTTP returned error: %v", err)
 		}
@@ -395,6 +426,17 @@ func TestServeHTTP(t *testing.T) {
 		}
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("expected 404 for invalid hash, got %d", rec.Code)
+		}
+	})
+
+	t.Run("advanced_invalid_path", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/openpgpkey/example.com/nope", nil)
+		if err := w.ServeHTTP(rec, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rec.Code)
 		}
 	})
 
