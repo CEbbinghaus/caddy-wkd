@@ -33,6 +33,15 @@ files in the top-level of the directory are read — subdirectories are not
 scanned recursively.
 If `extensions` is omitted, defaults are: `.gpg`, `.asc`, `.pub`, `.key`.
 
+## WKD Methods
+
+The plugin supports both WKD discovery methods defined in [RFC 9230](https://www.rfc-editor.org/rfc/rfc9230):
+
+- **Direct method**: `https://example.com/.well-known/openpgpkey/hu/<hash>`
+- **Advanced method**: `https://openpgpkey.example.com/.well-known/openpgpkey/example.com/hu/<hash>`
+
+Both methods are handled automatically — no additional configuration needed.
+
 ### Domain Filtering
 
 By default, keys are filtered by the request `Host` header at request time.
